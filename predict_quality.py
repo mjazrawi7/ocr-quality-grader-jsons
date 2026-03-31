@@ -520,38 +520,67 @@ Examples:
     errors = []
     start_time = time.time()
 
-    # Chunk file list into batches for reduced IPC overhead
-    batch_size = args.batch_size
-    batches = [
-        json_files[i : i + batch_size]
-        for i in range(0, len(json_files), batch_size)
-    ]
+    # S3 mode: use threads (I/O-bound) — much faster than processes for S3 streaming
+    # Local mode: use processes (CPU-bound)
+    use_threads = bool(args.s3_paths)
 
-    with Pool(
-        processes=n_workers,
-        initializer=_init_worker,
-        initargs=(effective_model_path,),
-    ) as pool:
+    if use_threads:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        # Load model once in main process for thread mode
+        _init_worker(effective_model_path)
         processed = 0
-        for batch_results in pool.imap_unordered(_process_batch, batches):
-            for result in batch_results:
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_process_file, p): p for p in json_files}
+            for future in as_completed(futures):
+                result = future.result()
                 if "error" in result:
                     errors.append(result)
                 else:
                     results.append(result)
                 processed += 1
+                if args.verbose and processed % 1000 == 0:
+                    elapsed = time.time() - start_time
+                    rate = processed / elapsed
+                    eta = (n_files - processed) / rate if rate > 0 else 0
+                    bad_so_far = sum(1 for r in results if r["prediction"] == "Bad")
+                    print(
+                        f"  [{processed:,}/{n_files:,}] "
+                        f"{rate:,.0f} files/sec | "
+                        f"ETA {eta / 60:.1f} min | "
+                        f"Bad so far: {bad_so_far:,}"
+                    )
+    else:
+        # Chunk file list into batches for reduced IPC overhead
+        batch_size = args.batch_size
+        batches = [
+            json_files[i : i + batch_size]
+            for i in range(0, len(json_files), batch_size)
+        ]
+        with Pool(
+            processes=n_workers,
+            initializer=_init_worker,
+            initargs=(effective_model_path,),
+        ) as pool:
+            processed = 0
+            for batch_results in pool.imap_unordered(_process_batch, batches):
+                for result in batch_results:
+                    if "error" in result:
+                        errors.append(result)
+                    else:
+                        results.append(result)
+                    processed += 1
 
-            if args.verbose and processed % 1000 < batch_size:
-                elapsed = time.time() - start_time
-                rate = processed / elapsed
-                eta = (n_files - processed) / rate if rate > 0 else 0
-                bad_so_far = sum(1 for r in results if r["prediction"] == "Bad")
-                print(
-                    f"  [{processed:,}/{n_files:,}] "
-                    f"{rate:,.0f} files/sec | "
-                    f"ETA {eta / 60:.1f} min | "
-                    f"Bad so far: {bad_so_far:,}"
-                )
+                if args.verbose and processed % 1000 < batch_size:
+                    elapsed = time.time() - start_time
+                    rate = processed / elapsed
+                    eta = (n_files - processed) / rate if rate > 0 else 0
+                    bad_so_far = sum(1 for r in results if r["prediction"] == "Bad")
+                    print(
+                        f"  [{processed:,}/{n_files:,}] "
+                        f"{rate:,.0f} files/sec | "
+                        f"ETA {eta / 60:.1f} min | "
+                        f"Bad so far: {bad_so_far:,}"
+                    )
 
     elapsed = time.time() - start_time
 
