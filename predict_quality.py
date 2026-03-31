@@ -401,8 +401,8 @@ Examples:
     )
     parser.add_argument(
         "-o", "--output",
-        default="predictions.csv",
-        help="Output CSV path (default: predictions.csv)",
+        default=None,
+        help="Output CSV path (default: output/results.csv)",
     )
     parser.add_argument(
         "-t", "--threshold",
@@ -500,6 +500,15 @@ Examples:
     else:
         print("ERROR: Provide either input_dir or --s3-paths", file=sys.stderr)
         sys.exit(1)
+
+    # ── Set up output directory ──
+    output_dir = Path(__file__).parent / "output"
+    output_dir.mkdir(exist_ok=True)
+    output_path = args.output if args.output else str(output_dir / "results.csv")
+    # Redirect output into output/ folder if only a filename (no directory) given
+    if args.output and not Path(args.output).parent.parts:
+        output_path = str(output_dir / args.output)
+    args.output = output_path
 
     n_workers = args.workers or cpu_count()
     n_files = len(json_files)
