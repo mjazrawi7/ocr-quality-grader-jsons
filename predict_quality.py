@@ -618,6 +618,19 @@ Examples:
     print(f"  OK:        {ok_count:,} ({pct_ok:.1f}%)")
     print(f"  Output:    {args.output}")
 
+    # ── Write summary.txt ──
+    summary_path = Path(args.output).parent / "summary.txt"
+    summary_lines = [
+        "{:<12}{:>10}    {}".format("", "Count", "%"),
+        "{:<12}{:>10,}    100%".format("Processed", len(results)),
+        "{:<12}{:>10,}    {:.1f}%".format("Bad", bad_count, pct_bad),
+        "{:<12}{:>10,}    {:.1f}%".format("OK", ok_count, pct_ok),
+        "{:<12}{:>10,}    -".format("Errors", len(errors)),
+    ]
+    with open(summary_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(summary_lines) + "\n")
+    print(f"  Summary:   {summary_path}")
+
     # Cleanup temp model if created
     if args.threshold is not None:
         os.unlink(effective_model_path)
