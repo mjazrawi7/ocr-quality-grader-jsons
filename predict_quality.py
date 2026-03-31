@@ -583,8 +583,10 @@ Examples:
     print(f"Complete in {elapsed:.1f}s ({n_files / elapsed:,.0f} files/sec)")
     print(f"  Processed: {len(results):,}")
     print(f"  Errors:    {len(errors):,}")
-    print(f"  Bad:       {bad_count:,} ({bad_count / len(results) * 100:.1f}%)")
-    print(f"  OK:        {ok_count:,} ({ok_count / len(results) * 100:.1f}%)")
+    pct_bad = (bad_count / len(results) * 100) if results else 0
+    pct_ok  = (ok_count  / len(results) * 100) if results else 0
+    print(f"  Bad:       {bad_count:,} ({pct_bad:.1f}%)")
+    print(f"  OK:        {ok_count:,} ({pct_ok:.1f}%)")
     print(f"  Output:    {args.output}")
 
     # Cleanup temp model if created
