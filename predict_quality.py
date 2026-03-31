@@ -616,7 +616,8 @@ Examples:
     print(f"  Output:    {args.output}")
 
     # ── Write summary.txt ──
-    summary_path = Path(args.output).parent / "summary.txt"
+    out_path = Path(args.output)
+    summary_path = out_path.parent / (out_path.stem + "_summary.txt")
     summary_lines = [
         "{:<12}{:>10}    {}".format("", "Count", "%"),
         "{:<12}{:>10,}    100%".format("Processed", len(results)),
