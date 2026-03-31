@@ -65,18 +65,40 @@ import numpy as np
 # ── Fast JSON parser (orjson is ~40% faster than stdlib json) ──
 try:
     import orjson
-
-    def _load_json(path):
-        with open(path, "rb") as f:
-            return orjson.loads(f.read())
-
+    def _parse_json(data: bytes):
+        return orjson.loads(data)
     _JSON_PARSER = "orjson"
 except ImportError:
-    def _load_json(path):
-        with open(path) as f:
-            return json.load(f)
-
+    def _parse_json(data: bytes):
+        return json.loads(data)
     _JSON_PARSER = "json (install orjson for ~40% faster parsing)"
+
+
+def _load_json(path):
+    """Load JSON from a local file path."""
+    with open(path, "rb") as f:
+        return _parse_json(f.read())
+
+
+def _load_json_s3(s3_path):
+    """Stream JSON directly from S3 without saving to disk."""
+    import threading
+    # Thread-local boto3 client to avoid contention
+    if not hasattr(_s3_local, "client"):
+        import boto3
+        from botocore.config import Config
+        _s3_local.client = boto3.client(
+            "s3",
+            config=Config(retries={"max_attempts": 3, "mode": "adaptive"}),
+        )
+    path = s3_path.removeprefix("s3://")
+    bucket, _, key = path.partition("/")
+    obj = _s3_local.client.get_object(Bucket=bucket, Key=key)
+    return _parse_json(obj["Body"].read())
+
+
+import threading
+_s3_local = threading.local()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -101,7 +123,10 @@ def extract_features(json_path):
 
     Returns a dict keyed by feature name.
     """
-    data = _load_json(json_path)
+    if str(json_path).startswith("s3://"):
+        data = _load_json_s3(json_path)
+    else:
+        data = _load_json(json_path)
 
     features = {}
 
@@ -295,7 +320,7 @@ def _init_worker(model_path):
 
 def _process_file(json_path):
     """
-    Process a single JSON file: extract features, predict, return result dict.
+    Process a single JSON file (local or s3://): extract features, predict, return result dict.
     Returns a dict with an 'error' key on failure.
     """
     try:
@@ -305,7 +330,7 @@ def _process_file(json_path):
         label = "Bad" if prob >= _threshold else "OK"
 
         return {
-            "filename": os.path.basename(json_path),
+            "filename": json_path.split("/")[-1],
             "prediction": label,
             "bad_probability": round(prob, 4),
             "confidence_mean": round(feats["confidence_mean"], 4),
@@ -317,7 +342,7 @@ def _process_file(json_path):
             "article_count": feats["article_count"],
         }
     except Exception as e:
-        return {"filename": os.path.basename(json_path), "error": str(e)}
+        return {"filename": json_path.split("/")[-1], "error": str(e)}
 
 
 def _process_batch(json_paths):
@@ -338,6 +363,15 @@ def discover_json_files(input_dir, recursive=False):
         return sorted([str(p) for p in input_path.glob("*.json")])
 
 
+def load_s3_paths(paths_file):
+    """Load S3 paths from a file (like json_files.txt)."""
+    with open(paths_file, encoding="utf-8") as f:
+        return [
+            l.strip() for l in f
+            if l.strip() and not l.startswith("JsonPath") and l.strip().startswith("s3://")
+        ]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
@@ -356,7 +390,14 @@ Examples:
     )
     parser.add_argument(
         "input_dir",
-        help="Directory containing JSON files to process",
+        nargs="?",
+        default=None,
+        help="Directory containing local JSON files to process",
+    )
+    parser.add_argument(
+        "--s3-paths",
+        default=None,
+        help="File containing S3 paths (e.g. json_files.txt). Streams JSONs directly from S3 — no download needed.",
     )
     parser.add_argument(
         "-o", "--output",
@@ -439,22 +480,32 @@ Examples:
         with open(model_path, "rb") as f:
             effective_threshold = pickle.load(f)["threshold"]
 
-    # ── Discover JSON files ──
-    input_dir = Path(args.input_dir)
-    if not input_dir.is_dir():
-        print(f"ERROR: Not a directory: {input_dir}", file=sys.stderr)
-        sys.exit(1)
-
-    json_files = discover_json_files(input_dir, recursive=args.recursive)
-    if not json_files:
-        print(f"ERROR: No .json files found in {input_dir}", file=sys.stderr)
+    # ── Discover JSON files (local dir or S3 paths file) ──
+    if args.s3_paths:
+        json_files = load_s3_paths(args.s3_paths)
+        if not json_files:
+            print(f"ERROR: No s3:// paths found in {args.s3_paths}", file=sys.stderr)
+            sys.exit(1)
+        input_label = f"{args.s3_paths} ({len(json_files):,} S3 paths)"
+    elif args.input_dir:
+        input_dir = Path(args.input_dir)
+        if not input_dir.is_dir():
+            print(f"ERROR: Not a directory: {input_dir}", file=sys.stderr)
+            sys.exit(1)
+        json_files = discover_json_files(input_dir, recursive=args.recursive)
+        if not json_files:
+            print(f"ERROR: No .json files found in {input_dir}", file=sys.stderr)
+            sys.exit(1)
+        input_label = f"{input_dir} ({len(json_files):,} JSON files)"
+    else:
+        print("ERROR: Provide either input_dir or --s3-paths", file=sys.stderr)
         sys.exit(1)
 
     n_workers = args.workers or cpu_count()
     n_files = len(json_files)
 
     print(f"predict_quality.py")
-    print(f"  Input:     {input_dir} ({n_files:,} JSON files)")
+    print(f"  Input:     {input_label}")
     print(f"  Output:    {args.output}")
     print(f"  Model:     {model_path}")
     print(f"  Threshold: {effective_threshold:.2f}")
