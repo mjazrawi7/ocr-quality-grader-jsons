@@ -81,24 +81,25 @@ def _load_json(path):
 
 
 def _load_json_s3(s3_path):
-    """Stream JSON directly from S3 without saving to disk."""
-    import threading
-    # Thread-local boto3 client to avoid contention
-    if not hasattr(_s3_local, "client"):
+    """Stream JSON directly from S3 — uses process-local boto3 client."""
+    global _s3_client
+    if _s3_client is None:
         import boto3
         from botocore.config import Config
-        _s3_local.client = boto3.client(
+        _s3_client = boto3.client(
             "s3",
-            config=Config(retries={"max_attempts": 3, "mode": "adaptive"}),
+            config=Config(
+                max_pool_connections=10,
+                retries={"max_attempts": 3, "mode": "adaptive"},
+            ),
         )
     path = s3_path.removeprefix("s3://")
     bucket, _, key = path.partition("/")
-    obj = _s3_local.client.get_object(Bucket=bucket, Key=key)
+    obj = _s3_client.get_object(Bucket=bucket, Key=key)
     return _parse_json(obj["Body"].read())
 
 
-import threading
-_s3_local = threading.local()
+_s3_client = None  # process-local S3 client
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -309,13 +310,23 @@ _threshold = None
 
 
 def _init_worker(model_path):
-    """Initializer for each worker process — loads the model once."""
-    global _model, _feature_names, _threshold
+    """Initializer for each worker process — loads model and boto3 client once per process."""
+    global _model, _feature_names, _threshold, _s3_client
     with open(model_path, "rb") as f:
         data = pickle.load(f)
     _model = data["model"]
     _feature_names = data["feature_names"]
     _threshold = data["threshold"]
+    # Pre-init boto3 client in each worker process
+    import boto3
+    from botocore.config import Config
+    _s3_client = boto3.client(
+        "s3",
+        config=Config(
+            max_pool_connections=10,
+            retries={"max_attempts": 3, "mode": "adaptive"},
+        ),
+    )
 
 
 def _process_file(json_path):
@@ -529,35 +540,12 @@ Examples:
     errors = []
     start_time = time.time()
 
-    # S3 mode: use threads (I/O-bound) — much faster than processes for S3 streaming
-    # Local mode: use processes (CPU-bound)
-    use_threads = bool(args.s3_paths)
+    # S3 and local both use multiprocessing (CPU-bound sklearn inference)
+    # boto3 client is initialized per worker process in _init_worker
+    use_threads = False
 
     if use_threads:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        # Load model once in main process for thread mode
-        _init_worker(effective_model_path)
-        processed = 0
-        with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            futures = {executor.submit(_process_file, p): p for p in json_files}
-            for future in as_completed(futures):
-                result = future.result()
-                if "error" in result:
-                    errors.append(result)
-                else:
-                    results.append(result)
-                processed += 1
-                if args.verbose and processed % 1000 == 0:
-                    elapsed = time.time() - start_time
-                    rate = processed / elapsed
-                    eta = (n_files - processed) / rate if rate > 0 else 0
-                    bad_so_far = sum(1 for r in results if r["prediction"] == "Bad")
-                    print(
-                        f"  [{processed:,}/{n_files:,}] "
-                        f"{rate:,.0f} files/sec | "
-                        f"ETA {eta / 60:.1f} min | "
-                        f"Bad so far: {bad_so_far:,}"
-                    )
+        pass  # kept for reference
     else:
         # Chunk file list into batches for reduced IPC overhead
         batch_size = args.batch_size
